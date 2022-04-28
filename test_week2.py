@@ -57,7 +57,7 @@ def on_start(data):
         pedestrian_routes[route] = "RED"
         localserver.send(set_light("pedestrian", route, pedestrian_routes[route]))
 
-    time.sleep(10)
+    time.sleep(4)
 
     print("stage2")
     for (route, state) in car_routes.items():
@@ -70,7 +70,7 @@ def on_start(data):
         pedestrian_routes[route] = "GREEN"
         localserver.send(set_light("pedestrian", route, pedestrian_routes[route]))
 
-    time.sleep(10)
+    time.sleep(4)
 
     print("stage3")
     for (route, state) in car_routes.items():
@@ -83,7 +83,7 @@ def on_start(data):
         pedestrian_routes[route] = "BLINKING"
         localserver.send(set_light("pedestrian", route, pedestrian_routes[route]))
     
-    time.sleep(10)
+    time.sleep(4)
 
     green = [1,2,8,22,33,34]
 
@@ -108,6 +108,6 @@ def on_start(data):
         localserver.send(set_light("pedestrian", route, pedestrian_routes[route]))
 
 if __name__ == "__main__":
-    localserver = server("RickTest")
+    localserver = server("martrick")
     localserver.add_callback("SESSION_START", on_start)
     localserver.start_server()
