@@ -1,7 +1,12 @@
 import time
 from server import *
-import json
+import logging
 import threading
+
+FORMAT = '[[%(levelname)s]] %(asctime)s - %(message)s'
+logging.basicConfig(format=FORMAT, filename='kruispunt.debug.log', level=logging.DEBUG)
+logging.basicConfig(format=FORMAT, filename='kruispunt.info.log', level=logging.INFO)
+logging.basicConfig(format=FORMAT, filename='kruispunt.error.log', level=logging.ERROR)
 
 current_state = {
     1:"RED",
@@ -28,6 +33,8 @@ current_state = {
     36:"RED",
     37:"RED",
     38:"RED",
+    41:"RED",
+    42:"RED"
 }
 
 crosses_with = {
@@ -58,16 +65,30 @@ crosses_with = {
     41:[42],
     42:[41],
 }
+
+# nice
+
+# bijhouden brug state
 bridge_state = 'DOWN'
 
 # Amount of updates per second
 UPDATE_RATE = 20
 
-GREEN_TIME = 6
+# evt extension time?
+GREEN_TIME = dict.fromkeys([1,2,3,4,5,7,8,9,10,11,12], 8)           # auto routes
+GREEN_TIME.update(dict.fromkeys([15], 6))                           # bus route
+GREEN_TIME.update(dict.fromkeys([21,22,23,24],8))                   # fiets route
+GREEN_TIME.update(dict.fromkeys([31,32,33,34,35,36,37,38], 6))      # voetganger routes
+GREEN_TIME.update(dict.fromkeys([41,42], 10))                       # boten
 
-ORANGE_TIME = 4
+ORANGE_TIME = dict.fromkeys([2,5,8,11], 4)                          # rechtdoorgaande auto routes
+ORANGE_TIME.update(dict.fromkeys([1,3,4,7,9,10,12], 3))             # afslaande auto routes
+ORANGE_TIME.update(dict.fromkeys([21,22,23,24], 3))                 # fiets routes
+ORANGE_TIME.update(dict.fromkeys([15], 4))                          # bus route
+ORANGE_TIME.update(dict.fromkeys([31,32,33,34,35,36,37,38], 3.5))   # voetgangers
+ORANGE_TIME.update(dict.fromkeys([41,42], 0))                       # om error te voorkomen
 
-BOAT_TIME = 10
+CLEARING_TIME = 2
 
 controller_active = True
 def controller_loop():
@@ -79,7 +100,7 @@ def controller_loop():
 # {routeID (int) : count (int)} template voor items pushed/popped
 traffic_queue = {}
 boat_queue = {}
-# time is in met tien vermenigvuldigd en is dus zoveel keer 0,1 seconden die het stoplicht op kleur moet. (stomme floating point precision)
+
 active_lights = []
 loop_thread = threading.Thread(target=controller_loop)
 queue_lock = threading.Lock()
@@ -88,10 +109,11 @@ def update_lights():
     for light in active_lights:
         if light['time'] <= 0:
             if light['state'] == "GREEN":
+                # alle routes die geen boot zijn gaan na groen op oranje/knipper
                 if light['route'] < 40:
                     add_to_active(light['route'], "ORANGE" if light['route'] < 30 else "BLINKING")
                     active_lights.remove(light)
-                else:
+                else: # route is voor boten
                     add_to_active(light['route'], 'CLEARING')
                     active_lights.remove(light)
             elif light['state'] in ['ORANGE', 'BLINKING']:
@@ -104,30 +126,35 @@ def update_lights():
             light['time'] -= 1
 
 def update_queue():
-    # don't even try.... doorstroming is een hoax.... 
-    # print(f"current queue: {traffic_queue}", flush=True)
     if len(traffic_queue) > 0:
-        # with queue_lock:
-        #     for route, count in traffic_queue.items():
-        #         if can_go_green(route):
-        #             add_to_active(route, "GREEN")
-        #             del traffic_queue[route]
-        route, count = list(traffic_queue.items())[0]
+        route, _ = list(traffic_queue.items())[0]
         if can_go_green(route):
             add_to_active(route, "GREEN")
             del traffic_queue[route]
 
+    global bridge_state
     if bridge_state == 'UP':
         if len(boat_queue) > 0:
             route, _ = list(boat_queue.items())[0]
+            logging.debug(" bridge queue: %s | route: %s", boat_queue, route)
             if can_go_green(route):
                 add_to_active(route, "GREEN")
-                del traffic_queue[route]
-        else:
+                del boat_queue[route]
+        elif current_state[41]!='GREEN' and current_state[42]!="GREEN":
             request_bridge_water_empty()
-            bridge_state = 'DOWN'
+            bridge_state = 'CLOSING'
 
-event_types = ["SET_AUTOMOBILE_ROUTE_STATE","SET_AUTOMOBILE_ROUTE_STATE","SET_CYCLIST_ROUTE_STATE","SET_PEDESTRIAN_ROUTE_STATE"]
+    if len(boat_queue) > 0:
+        if bridge_state == "DOWN":
+            localserver.send("SET_BRIDGE_WARNING_LIGHT_STATE",
+            {
+                "state" : "ON"
+            })
+
+            localserver.send("REQUEST_BRIDGE_ROAD_EMPTY",{})
+            bridge_state = "OPENING"
+
+event_types = ["SET_AUTOMOBILE_ROUTE_STATE","SET_AUTOMOBILE_ROUTE_STATE","SET_CYCLIST_ROUTE_STATE","SET_PEDESTRIAN_ROUTE_STATE","SET_BOAT_ROUTE_STATE"]
 def get_event_type(route:int):
     first_num = route // 10
     return event_types[first_num]
@@ -142,183 +169,139 @@ def can_go_green(route:int):
     return True
 
 def add_to_active(route:int, state:str):
-    if state == 'CLEARING':
-        tmp = {'route':route,'state':state, 'time': 6*UPDATE_RATE}
-        active_lights.append(tmp)
-        print(f"route: {route} set to {state}")
-        localserver.send(
-            json.dumps({
-                "eventType":get_event_type(route),
-                "data":{
-                    "routeId":route,
-                    "state":"RED"
-                }
-            })
-        )
-        current_state[route] = state
-    else:
-        tmp = {'route':route,'state':state, 'time': GREEN_TIME*UPDATE_RATE if state == "GREEN" else ORANGE_TIME*UPDATE_RATE}
-        active_lights.append(tmp)
-        print(f"route: {route} set to {state}")
-        localserver.send(
-            json.dumps({
-                "eventType":get_event_type(route),
-                "data":{
-                    "routeId":route,
-                    "state":state
-                }
-            })
-        )
-        current_state[route] = state
+    timetable = {
+        'CLEARING':CLEARING_TIME,
+        'GREEN':GREEN_TIME[route],
+        'ORANGE':ORANGE_TIME[route],
+        'BLINKING':ORANGE_TIME[route]
+    }
+    tmp = {'route':route,'state':state, 'time': timetable[state]*UPDATE_RATE}
+    active_lights.append(tmp)
+    logging.debug("route: %s set to %s", route, state)
+    localserver.send(get_event_type(route),
+    {
+        "routeId":route,
+        "state":"RED" if state == 'CLEARING' else state
+    })
+    current_state[route] = state
 
 def on_start(data):
-    controller_active = True
+    logging.info("session start!")
+    global controller_active
+    controller_active = True   
     loop_thread.start()
-    print("session start!")
 
 def on_stop(data):
-    controller_active = False
-    loop_thread.join()
-    traffic_queue.clear()
-    active_lights.clear()
-    print("SESSION STOPPED")
+    logging.info("SESSION STOPPED")
+    exit()
+    
 
 def on_entity_entered(data):
-    # with queue_lock:
-    print(f"{data}", flush=True)
     routeID = data['routeId']
     sensorID = data['sensorId']
+    logging.debug("Entity entered on %s : %s", routeID, sensorID)
     #car
     if routeID < 20:
-        if current_state[routeID] == "RED":
-            # afhankelijk van welke zone geïmplementeerd is
-            if sensorID % 2 == 1:
-                if routeID not in traffic_queue:
-                    traffic_queue[routeID] = 1
-                else:
-                    traffic_queue[routeID] += 1
+        if current_state[routeID] == 'RED':
+            if routeID not in traffic_queue:
+                traffic_queue[routeID] = 1
+            else:
+                traffic_queue[routeID] += 1
 
     #bike
     elif routeID < 30:
-        if current_state[routeID] == "RED":
+        if current_state[routeID]  == 'RED':
             if routeID not in traffic_queue:
                 traffic_queue[routeID] = 1
 
     #pedestrian
     elif routeID < 40:
-        if current_state[routeID] == "RED":
+        if current_state[routeID]  == 'RED':
             if routeID not in traffic_queue:
                 traffic_queue[routeID] = 1
 
     #boat
     else:
+        global bridge_state
         if routeID not in boat_queue:
             boat_queue[routeID] = 1
-            localserver.send(
-                json.dumps({
-                    "eventType": "SET_BRIDGE_WARNING_LIGHT_STATE",
-                    "data" : {
-                        "state" : "ON"
-                    }
-                })
-            )
-            localserver.send(
-                json.dumps({ 
-                    "eventType" : "REQUEST_BRIDGE_ROAD_EMPTY",  
-                })
-            )
+        if bridge_state == "DOWN":
+            localserver.send("SET_BRIDGE_WARNING_LIGHT_STATE",
+            {
+                "state" : "ON"
+            })
+
+            localserver.send("REQUEST_BRIDGE_ROAD_EMPTY",{})
+            bridge_state = "OPENING"
 
 def on_entity_exited(data):
-    print(f"{data} exited zone")
+    logging.debug("%s exited zone", data)
 
 def on_acknowledge_empty_road(data):
-    localserver.send(
-        json.dumps({
-            "eventType" : "REQUEST_BARRIERS_STATE",
-            "data" : {
-                "state" : "DOWN"
-            }
-        })
-    )
+    logging.debug('acknowledged empty road')
+    localserver.send("REQUEST_BARRIERS_STATE",
+    {
+        "state" : "DOWN"
+    })
 
 def on_acknowledge_barrier_state(data):
+    logging.debug('acknowledged barrier state: %s', data["state"])
     if data["state"] == "UP":
-        localserver.send(
-            json.dumps({
-                'eventType': 'SET_BRIDGE_WARNING_LIGHT_STATE',
-                'data':{
-                    'state': 'OFF'
-                }
-            })
-        )
+        localserver.send('SET_BRIDGE_WARNING_LIGHT_STATE',
+        {
+            'state': 'OFF'
+        })
+        global bridge_state
+        bridge_state = "DOWN"
     else: # state == "DOWN"
         route, _ = list(boat_queue.items())[0]
-        localserver.send(
-            json.dumps({
-                "eventType" : "SET_BOAT_ROUTE_STATE",
-                "data" : {
-                    "routeId" : route,
-                    "state" : "GREENRED"
-                }
-            })
-        )
+        localserver.send("SET_BOAT_ROUTE_STATE",
+        {
+            "routeId" : route,
+            "state" : "GREENRED"
+        })
+
         current_state[route] = "GREENRED"
-        localserver.send(
-            json.dumps({
-                "eventType" : "REQUEST_BRIDGE_STATE",
-                "data" : {
-                    "state" : "UP"
-                }
-            })
-        )
+        localserver.send("REQUEST_BRIDGE_STATE",
+        {
+            "state" : "UP"
+        })
 
 def on_acknowledge_bridge_state(data):
+    logging.debug('acknowledged bridge state: %s', data["state"])
     if data["state"] == "UP":
+        global bridge_state
         bridge_state = 'UP'
 
     else: # state == "DOWN"
-        localserver.send(
-            json.dumps({
-                'eventType': 'REQUEST_BARRIER_STATE',
-                'data':{
-                    'state': 'UP'
-                }
-            })
-        )
+        localserver.send('REQUEST_BARRIERS_STATE',
+        {
+            'state': 'UP'
+        })
 
 def on_acknowledge_bridge_water_empty(data):
+    logging.debug('acknowledged bridge water empty')
     for route in [41,42]:
-        localserver.send(
-            json.dumps({
-                'eventType': 'SET_BOAT_ROUTE_STATE',
-                'data':{
-                    'routeId': route,
-                    'state': 'RED'
-                }
+        if current_state[route] != "RED":
+            localserver.send('SET_BOAT_ROUTE_STATE',
+            {
+                'routeId': route, 
+                'state': 'RED'
             })
-        )
-
-    localserver.send(
-            json.dumps({
-                'eventType': 'REQUEST_BRIDGE_STATE',
-                'data':{
-                    'state': 'DOWN'
-                }
-            })
-        )
+            current_state[route] = "RED"
+    localserver.send('REQUEST_BRIDGE_STATE',
+    {
+        'state': 'DOWN'
+    })
 
 def request_bridge_water_empty():
-    localserver.send(
-        json.dumps({
-            "eventType": "REQUEST_BRIDGE_WATER_EMPTY"
-        })
-    )
+    localserver.send("REQUEST_BRIDGE_WATER_EMPTY",{})
 
 def on_error(data):
-    print(f"{data}")
+    logging.error("ERROR: [[[%s]]]", data)
 
 if __name__ == "__main__":
-    localserver = server("Justin_mag_dit_nooit_zien!")
+    localserver = server("test69")
     # 'normaal' verkeer
     localserver.add_callback("SESSION_START", on_start)
     localserver.add_callback("SESSION_STOP", on_stop)
@@ -337,4 +320,5 @@ if __name__ == "__main__":
     localserver.add_callback("ERROR_UNKNOWN_EVENT_TYPE", on_error)
     localserver.add_callback("ERROR_NOT_PARSEABLE", on_error)
 
+    # start server
     localserver.start_server()

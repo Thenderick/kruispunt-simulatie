@@ -41,5 +41,16 @@ class server:
     def add_callback(self, key:str, callback: Callable[[dict], None]):
         self.callbacks[key] = callback
     
-    def send(self, message: str):
+    def sendstr(self, message: str):
         self.server.send(message)
+
+    def send(self, eventType: str, data: dict):
+        if data == {}:
+            self.sendstr(json.dumps({
+                "eventType": eventType
+            }))
+        else:
+            self.sendstr(json.dumps({
+                "eventType": eventType,
+                "data":data
+            }))
